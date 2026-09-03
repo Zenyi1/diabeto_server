@@ -1,0 +1,29 @@
+{
+  "name": "diabeto-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Meal-photo analysis backend for the diabeto app",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "vercel dev",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
+    "@hono/node-server": "^2.1.1",
+    "@upstash/redis": "^1.38.3",
+    "cbor-x": "^1.6.6",
+    "hono": "^4.13.5",
+    "jose": "^6.2.10",
+    "pkijs": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.7.0"
+  }
+}

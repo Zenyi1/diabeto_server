@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noEmit": true,
+    // Relative imports use .js specifiers (standard TS ESM): that is exactly what
+    // Vercel emits, and tsx resolves them back to .ts when running the tests.
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["api/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
+}

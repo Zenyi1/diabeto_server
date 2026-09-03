@@ -1,0 +1,9 @@
+node_modules/
+.vercel
+*.p8
+.DS_Store
+
+# Secrets. The negation must come last, or the wildcard swallows it again.
+.env
+.env.*
+!.env.example
