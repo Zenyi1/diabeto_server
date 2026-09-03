@@ -123,7 +123,9 @@ export class FakeUpstash {
       }
       case 'hgetall': {
         const entry = this.live(key);
-        if (!(entry?.value instanceof HashMap)) return null;
+        // A missing hash is an empty list, not null — the client turns [] into
+        // null itself, and feeding it null makes its deserializer throw.
+        if (!(entry?.value instanceof HashMap)) return [];
         // Redis answers with a flat field/value list; the client pairs it up.
         return [...entry.value].flatMap(([field, value]) => [field, String(value)]);
       }
@@ -158,6 +160,19 @@ export class FakeUpstash {
         }
         this.store.set(key, { value: zset, expiresAt: entry?.expiresAt });
         return ch ? changed : added;
+      }
+      case 'zcard': {
+        const entry = this.live(key);
+        return entry?.value instanceof ZSet ? entry.value.size : 0;
+      }
+      case 'zrange': {
+        const entry = this.live(key);
+        if (!(entry?.value instanceof ZSet)) return [];
+        const sorted = [...entry.value].sort((a, b) => a[1] - b[1]).map(([member]) => member);
+        if (rest.some((part) => part.toLowerCase() === 'rev')) sorted.reverse();
+        const start = Number(rest[0]);
+        const stop = Number(rest[1]);
+        return sorted.slice(start, stop < 0 ? undefined : stop + 1);
       }
       case 'zscore': {
         const entry = this.live(key);

@@ -1,12 +1,11 @@
 /**
- * Reads the live datastore and prints what is actually in it.
+ * Prints who is registered and what they have cost.
  *
- * There is no SQL database — identity and metering live in Redis, so this is the
- * "users table". Run it against production with `npm run users`.
+ * Reads the same O(1) roll-up counters the /admin routes serve, so it stays fast
+ * no matter how many users exist — there is no scan over the keyspace.
  *
- * Usage:
- *   npm run users            # summary + one row per user
- *   npm run users -- --keys  # also list every attest key and raw key namespace
+ *   npm run users              # totals + the 25 most recent signups
+ *   npm run users -- --all     # every user, paged
  */
 
 import { readFileSync } from 'node:fs';
@@ -18,77 +17,56 @@ for (const file of ['.env.local', '.env']) {
       if (match && !process.env[match[1]]) process.env[match[1]] = match[2].replace(/^"|"$/g, '');
     }
   } catch {
-    // Optional: whichever file exists is enough.
+    // Whichever of the two exists is enough.
   }
 }
 
+const { readGlobalStats, listUsers, readUsage } = await import('../src/usage.js');
 const { redis } = await import('../src/redis.js');
-const client = redis();
 
-async function scanAll(pattern: string): Promise<string[]> {
-  const found: string[] = [];
-  let cursor = '0';
-  do {
-    const [next, batch] = await client.scan(cursor, { match: pattern, count: 500 });
-    cursor = String(next);
-    found.push(...batch);
-  } while (cursor !== '0');
-  return found;
-}
-
-function isoDay(value: unknown): string {
+const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(4)}`;
+const day = (value: unknown) => {
   const ms = Number(value);
   return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString().slice(0, 10) : '—';
+};
+
+const stats = await readGlobalStats();
+
+console.log(`\n  users            ${stats.users}`);
+console.log(`  period           ${stats.period}\n`);
+console.log(`  this month       ${stats.month.requests} analyses · ${usd(stats.month.usdMicros)}`);
+console.log(`  today            ${stats.today.requests} analyses · ${usd(stats.today.usdMicros)}`);
+if (stats.month.requests > 0) {
+  console.log(`  avg per analysis ${usd(Math.round(stats.month.usdMicros / stats.month.requests))}`);
 }
+console.log();
 
-const month = new Date().toISOString().slice(0, 7);
-const userKeys = await scanAll('user:*');
-
-console.log(`\nstore: ${process.env.KV_REST_API_URL?.replace(/https:\/\//, '').slice(0, 30) ?? 'unknown'}…`);
-console.log(`users: ${userKeys.length}\n`);
-
-if (userKeys.length === 0) {
-  console.log('No users yet. /auth/apple is the only thing that creates one, and Sign in');
-  console.log('with Apple needs a paid Apple Developer Program membership to work at all.\n');
+if (stats.users === 0) {
+  console.log('  No users yet. Only POST /auth/apple creates one, and Sign in with Apple');
+  console.log('  needs a paid Apple Developer Program membership to work at all.\n');
 } else {
+  const pageSize = process.argv.includes('--all') ? 200 : 25;
+  const ids = await listUsers(pageSize, 0);
   const rows = await Promise.all(
-    userKeys.map(async (key) => {
-      const appleSub = key.slice('user:'.length);
+    ids.map(async (id) => {
       const [record, devices, usage] = await Promise.all([
-        client.get<Record<string, unknown>>(key),
-        client.smembers(`attestkeys:${appleSub}`),
-        client.hgetall<Record<string, unknown>>(`usage:${appleSub}:${month}`),
+        redis().get<Record<string, unknown>>(`user:${id}`),
+        redis().scard(`attestkeys:${id}`),
+        readUsage(id),
       ]);
       return {
-        'apple sub': appleSub.length > 28 ? `${appleSub.slice(0, 25)}…` : appleSub,
+        user: id.length > 26 ? `${id.slice(0, 23)}…` : id,
         email: (record?.email as string) ?? '—',
-        created: isoDay(record?.createdAt),
-        'last seen': isoDay(record?.lastSeenAt),
-        devices: devices.length,
-        [`requests (${month})`]: Number(usage?.requests ?? 0),
-        tokens: Number(usage?.inputTokens ?? 0) + Number(usage?.outputTokens ?? 0),
-        'usd': (Number(usage?.usdMicros ?? 0) / 1_000_000).toFixed(4),
+        joined: day(record?.createdAt),
+        seen: day(record?.lastSeenAt),
+        devices,
+        analyses: usage.month.requests,
+        cost: usd(usage.month.usdMicros),
       };
     }),
   );
   console.table(rows);
-}
-
-if (process.argv.includes('--keys')) {
-  const namespaces: Record<string, string> = {
-    'user:*': 'account record (apple sub, name, email, timestamps)',
-    'attest:*': 'App Attest public key per device',
-    'attestkeys:*': "each user's set of device key ids",
-    'challenge:*': 'one-time attest challenges (5 min TTL)',
-    'revoked:*': 'session revocation markers from account deletion',
-    'usage:*': 'per-user monthly and daily metering',
-    'rl:*': 'rate-limit counters',
-    'usda:*': 'cached nutrition lookups',
-  };
-  console.log('key namespaces:\n');
-  for (const [pattern, description] of Object.entries(namespaces)) {
-    const keys = await scanAll(pattern);
-    console.log(`  ${pattern.padEnd(14)} ${String(keys.length).padStart(5)}  ${description}`);
+  if (stats.users > ids.length) {
+    console.log(`  showing ${ids.length} of ${stats.users}${pageSize < 200 ? ' — pass --all for more' : ''}\n`);
   }
-  console.log();
 }

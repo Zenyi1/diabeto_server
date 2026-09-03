@@ -67,7 +67,7 @@ export class DecomposeError extends Error {
 
 export interface DecomposeResult {
   foods: DecomposedFood[];
-  usage: { inputTokens: number; outputTokens: number };
+  usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
 }
 
 export async function decompose(
@@ -123,10 +123,15 @@ export async function decompose(
 
   const payload = (await response.json()) as {
     choices?: { message?: { content?: string; refusal?: string } }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+    };
   };
   const usage = {
     inputTokens: Number(payload.usage?.prompt_tokens) || 0,
+    cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens) || 0,
     outputTokens: Number(payload.usage?.completion_tokens) || 0,
   };
   const message = payload.choices?.[0]?.message;

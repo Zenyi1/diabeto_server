@@ -20,11 +20,21 @@ export interface OpenAiBehaviour {
   delayMs?: number;
   /** Token counts, as OpenAI reports them. Defaults to a realistic pair. */
   usage?: { prompt_tokens: number; completion_tokens: number };
+  /**
+   * Answer for the cheap macro-fallback call, matched by model name. Per-100g
+   * rows: `[{ name, carbs, protein, fat }]`. Empty means the rescue finds nothing.
+   */
+  fallbackFoods?: unknown[];
+  /** Token counts for the fallback call specifically. */
+  fallbackUsage?: { prompt_tokens: number; completion_tokens: number };
 }
 
 export class FakeOpenAi {
   private server: Server | null = null;
   behaviour: OpenAiBehaviour = { foods: [] };
+
+  /** Model name that should be answered with macro estimates rather than foods. */
+  fallbackModel = 'test-fallback-model';
 
   /** Bodies of every request received, for asserting on prompt construction. */
   readonly requests: Record<string, unknown>[] = [];
@@ -34,10 +44,23 @@ export class FakeOpenAi {
       let body = '';
       req.on('data', (chunk) => (body += chunk));
       req.on('end', async () => {
+        let parsed: Record<string, unknown> = {};
         try {
-          this.requests.push(JSON.parse(body));
+          parsed = JSON.parse(body);
+          this.requests.push(parsed);
         } catch {
           this.requests.push({ unparseable: body.slice(0, 200) });
+        }
+
+        // The macro rescue hits the same endpoint with a different model.
+        if (parsed.model === this.fallbackModel) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(
+            JSON.stringify({
+              choices: [{ message: { content: JSON.stringify({ foods: this.behaviour.fallbackFoods ?? [] }) } }],
+              usage: this.behaviour.fallbackUsage ?? { prompt_tokens: 40, completion_tokens: 30 },
+            }),
+          );
         }
 
         const behaviour = this.behaviour;
@@ -83,8 +106,21 @@ export class FakeOpenAi {
 export class FakeUsda {
   private server: Server | null = null;
 
-  /** Per-100g macros keyed by lowercase query. Absent = a USDA miss. */
+  /**
+   * Single-hit shortcut: per-100g macros keyed by lowercase query, described by
+   * the query itself so it scores as an exact match. Absent = a USDA miss.
+   */
   readonly foods = new Map<string, { protein: number; fat: number; carbs: number }>();
+
+  /**
+   * Full search results, for exercising the match scorer — USDA's top hit is
+   * often a different food that merely shares a word.
+   */
+  readonly candidates = new Map<
+    string,
+    { description: string; protein: number; fat: number; carbs: number }[]
+  >();
+
   status = 200;
   delayMs = 0;
   queries: string[] = [];
@@ -103,21 +139,21 @@ export class FakeUsda {
         return res.end(JSON.stringify({ error: 'usda failure' }));
       }
 
-      const match = this.foods.get(query);
+      const simple = this.foods.get(query);
+      const rows =
+        this.candidates.get(query) ?? (simple ? [{ description: query, ...simple }] : []);
+
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
-          foods: match
-            ? [
-                {
-                  foodNutrients: [
-                    { nutrientId: 1003, nutrientName: 'Protein', value: match.protein },
-                    { nutrientId: 1004, nutrientName: 'Total lipid (fat)', value: match.fat },
-                    { nutrientId: 1005, nutrientName: 'Carbohydrate, by difference', value: match.carbs },
-                  ],
-                },
-              ]
-            : [],
+          foods: rows.map((row) => ({
+            description: row.description,
+            foodNutrients: [
+              { nutrientId: 1003, nutrientName: 'Protein', value: row.protein },
+              { nutrientId: 1004, nutrientName: 'Total lipid (fat)', value: row.fat },
+              { nutrientId: 1005, nutrientName: 'Carbohydrate, by difference', value: row.carbs },
+            ],
+          })),
         }),
       );
     });
@@ -128,6 +164,7 @@ export class FakeUsda {
 
   reset(): void {
     this.foods.clear();
+    this.candidates.clear();
     this.status = 200;
     this.delayMs = 0;
     this.queries = [];

@@ -24,11 +24,20 @@ import {
   verifyAppleIdentityToken,
   verifySessionToken,
 } from '../src/session.js';
-import { deleteUsage, readUsage, recordUsage } from '../src/usage.js';
+import {
+  deleteUsage,
+  indexUser,
+  listUsers,
+  readGlobalStats,
+  readUsage,
+  recordUsage,
+  unindexUser,
+} from '../src/usage.js';
 import { AttestError, verifyAssertion, verifyAttestation, type AttestKeyRecord } from '../src/attest.js';
 import { SubscriptionError, verifySubscriptionJws } from '../src/subscription.js';
 import { DecomposeError, decompose } from '../src/openai.js';
-import { macrosFor } from '../src/usda.js';
+import { macrosFor, scaleMacros } from '../src/usda.js';
+import { estimateMacros, normalize } from '../src/macro-fallback.js';
 import { limitIp, limitUser } from '../src/ratelimit.js';
 
 class HttpError extends Error {
@@ -152,8 +161,10 @@ app.post('/auth/apple', async (c) => {
 
   const key = `user:${identity.appleUserId}`;
   const existing = await redis().get<{ createdAt?: number; fullName?: string; email?: string }>(key);
+  const createdAt = existing?.createdAt ?? Date.now();
+  await indexUser(identity.appleUserId, createdAt);
   await redis().set(key, {
-    createdAt: existing?.createdAt ?? Date.now(),
+    createdAt,
     lastSeenAt: Date.now(),
     // Apple returns these only on the very first authorization, so an existing
     // value is never overwritten by the nulls of later sign-ins.
@@ -175,6 +186,7 @@ app.delete('/account', async (c) => {
     await redis().zrem('attest:counters', ...keyIds);
   }
   await redis().del(`attestkeys:${userId}`, `user:${userId}`);
+  await unindexUser(userId);
   await deleteUsage(userId);
   // Outstanding tokens must die now, not whenever they happen to expire.
   await revokeSessions(userId);
@@ -191,6 +203,62 @@ app.get('/usage', async (c) => {
     today: usage.today,
     limits: { perDay: config.limits.perDay, perMinute: config.limits.perMinute },
   });
+});
+
+// ----------------------------------------------------------------- admin
+
+/**
+ * Read-only operator views. Absent entirely unless ADMIN_TOKEN is set, and a
+ * wrong token 404s rather than 401s so the routes don't advertise themselves.
+ */
+function requireAdmin(request: Request): void {
+  const token = bearer(request);
+  if (!config.adminToken || !token || !timingSafeEqualString(token, config.adminToken)) {
+    throw new HttpError(404, 'Not found.');
+  }
+}
+
+app.get('/admin/stats', async (c) => {
+  requireAdmin(c.req.raw);
+  assertConfigured();
+  const stats = await readGlobalStats();
+  return c.json({
+    users: stats.users,
+    period: stats.period,
+    month: { ...stats.month, usd: stats.month.usdMicros / 1_000_000 },
+    today: { ...stats.today, usd: stats.today.usdMicros / 1_000_000 },
+    model: config.openai.model,
+  });
+});
+
+app.get('/admin/users', async (c) => {
+  requireAdmin(c.req.raw);
+  assertConfigured();
+
+  const limit = Math.min(Number(c.req.query('limit') ?? 50) || 50, 200);
+  const offset = Math.max(Number(c.req.query('offset') ?? 0) || 0, 0);
+  const ids = await listUsers(limit, offset);
+
+  const users = await Promise.all(
+    ids.map(async (id) => {
+      const [record, devices, usage] = await Promise.all([
+        redis().get<{ createdAt?: number; lastSeenAt?: number; email?: string; fullName?: string }>(`user:${id}`),
+        redis().scard(`attestkeys:${id}`),
+        readUsage(id),
+      ]);
+      return {
+        id,
+        email: record?.email ?? null,
+        fullName: record?.fullName ?? null,
+        createdAt: record?.createdAt ?? null,
+        lastSeenAt: record?.lastSeenAt ?? null,
+        devices,
+        month: { ...usage.month, usd: usage.month.usdMicros / 1_000_000 },
+      };
+    }),
+  );
+
+  return c.json({ users, limit, offset });
 });
 
 // ---------------------------------------------------------------- attest
@@ -392,27 +460,49 @@ app.post('/analyze', async (c) => {
   try {
     const { foods, usage } = await decompose(imageBase64, scaleHint, controller.signal);
 
-    // Metered on the tokens actually spent, not just the request, so a 12-food
-    // plate isn't accounted the same as a 2-food one. Never blocks the response.
-    void recordUsage(userId, usage);
-
     // Parallel, order-preserving: the response array must line up with the
     // decomposed foods the model returned.
-    const analyzed = await Promise.all(
-      foods.map(async (food) => {
-        const macros = await macrosFor(food.name, food.grams, controller.signal);
-        return {
-          name: food.name,
-          grams: finite(food.grams, 1, config.limits.maxGramsPerFood),
-          carbs: finite(macros.carbs, 1, config.limits.maxMacroGrams),
-          protein: finite(macros.protein, 1, config.limits.maxMacroGrams),
-          fat: finite(macros.fat, 1, config.limits.maxMacroGrams),
-          confidence: finite(food.confidence, 2, 1),
-        };
-      }),
+    const entries = await Promise.all(
+      foods.map(async (food) => ({
+        food,
+        macros: await macrosFor(food.name, food.grams, controller.signal),
+      })),
     );
 
-    return c.json({ foods: analyzed });
+    // USDA stays the authority; the cheap model only fills the gaps it leaves.
+    // Without this a food USDA can't match reports 0g carbs, which in a dosing
+    // app reads as "no insulin needed" rather than "unknown".
+    const gaps = entries.filter((entry) => !entry.macros.resolved);
+    let fallbackUsage: { inputTokens: number; cachedInputTokens: number; outputTokens: number } | null = null;
+    if (gaps.length > 0) {
+      const estimate = await estimateMacros(
+        gaps.map((entry) => entry.food.name),
+        controller.signal,
+      );
+      fallbackUsage = estimate.usage;
+      for (const entry of gaps) {
+        const per100g = estimate.per100g.get(normalize(entry.food.name));
+        if (per100g) entry.macros = { ...scaleMacros(per100g, entry.food.grams), resolved: true };
+      }
+    }
+
+    // Metered on the tokens actually spent across both models, not just the
+    // request, so a 12-food plate isn't accounted the same as a 2-food one.
+    void recordUsage(userId, [
+      { usage },
+      ...(fallbackUsage ? [{ usage: fallbackUsage, rates: config.fallback }] : []),
+    ]);
+
+    return c.json({
+      foods: entries.map(({ food, macros }) => ({
+        name: food.name,
+        grams: finite(food.grams, 1, config.limits.maxGramsPerFood),
+        carbs: finite(macros.carbs, 1, config.limits.maxMacroGrams),
+        protein: finite(macros.protein, 1, config.limits.maxMacroGrams),
+        fat: finite(macros.fat, 1, config.limits.maxMacroGrams),
+        confidence: finite(food.confidence, 2, 1),
+      })),
+    });
   } catch (error) {
     if (timedOut) throw new HttpError(504, 'That took too long to analyze. Please try again.');
     if (error instanceof DecomposeError) throw new HttpError(error.retryable ? 503 : 422, error.message);

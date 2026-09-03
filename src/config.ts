@@ -95,6 +95,11 @@ if (configuredBypassToken && isProductionDeployment) {
   warnings.push('DEV_BYPASS_TOKEN is set — it skips every auth gate and must be removed before launch');
 }
 
+const adminToken = str('ADMIN_TOKEN');
+if (adminToken && adminToken.length < 32) {
+  problems.push('ADMIN_TOKEN is shorter than 32 characters — it guards user emails, so make it long');
+}
+
 /**
  * A gate that is switched on in production must be pointed at production Apple
  * infrastructure. Otherwise `REQUIRE_ATTEST=true` with a development aaguid is a
@@ -161,15 +166,30 @@ export const config = {
     requireSubscription,
   },
   devBypassToken,
+  /**
+   * Gates the read-only /admin views. Unset means the routes 404 — an admin
+   * surface that only exists when you deliberately turn it on.
+   */
+  adminToken,
   isProductionDeployment,
   /**
    * Per-million-token rates for the configured model, used to turn the usage
-   * numbers OpenAI returns into a spend figure. Left at zero by default — a
-   * guessed price is worse than none. Token counts are recorded either way.
+   * numbers OpenAI returns into a spend figure. Defaults are gpt-5.1's published
+   * rates; change them when changing OPENAI_MODEL, or the numbers silently lie.
+   * Token counts are recorded regardless of what these are set to.
    */
   pricing: {
-    inputUsdPerMillion: Number(str('OPENAI_INPUT_USD_PER_MTOK', '0')) || 0,
-    outputUsdPerMillion: Number(str('OPENAI_OUTPUT_USD_PER_MTOK', '0')) || 0,
+    inputUsdPerMillion: Number(str('OPENAI_INPUT_USD_PER_MTOK', '1.25')) || 0,
+    outputUsdPerMillion: Number(str('OPENAI_OUTPUT_USD_PER_MTOK', '10')) || 0,
+    /** Repeat prompt prefixes bill at a tenth; the system prompt is constant here. */
+    cachedInputUsdPerMillion: Number(str('OPENAI_CACHED_INPUT_USD_PER_MTOK', '0.125')) || 0,
+  },
+  /** Text-only rescue for foods USDA can't price. Rates are gpt-5-nano's. */
+  fallback: {
+    model: str('OPENAI_FALLBACK_MODEL', 'gpt-5-nano'),
+    inputUsdPerMillion: Number(str('OPENAI_FALLBACK_INPUT_USD_PER_MTOK', '0.05')) || 0,
+    outputUsdPerMillion: Number(str('OPENAI_FALLBACK_OUTPUT_USD_PER_MTOK', '0.4')) || 0,
+    cachedInputUsdPerMillion: Number(str('OPENAI_FALLBACK_CACHED_INPUT_USD_PER_MTOK', '0.005')) || 0,
   },
   limits: {
     perMinute: num('RATE_LIMIT_PER_MIN', 10),

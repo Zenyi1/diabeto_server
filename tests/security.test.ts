@@ -509,16 +509,90 @@ describe('pipeline behaviour', () => {
     assert.equal(payload.foods[0].grams, 150);
   });
 
-  it('returns zeros rather than failing when USDA has no match', async () => {
+  it('rescues a USDA miss with the cheap model instead of reporting zero carbs', async () => {
     const dev = await device();
-    h.openai.behaviour = { foods: oneFood('pad thai', 300) };
+    h.openai.behaviour = {
+      foods: oneFood('pad thai', 300),
+      fallbackFoods: [{ name: 'pad thai', carbs: 30, protein: 8, fat: 6 }],
+    };
 
     const res = await dev.analyze();
     const payload = (await res.json()) as { foods: Record<string, number>[] };
 
     assert.equal(res.status, 200);
-    assert.equal(payload.foods[0].carbs, 0);
+    assert.equal(payload.foods[0].carbs, 90, '30g/100g scaled to 300g');
+    assert.equal(payload.foods[0].protein, 24);
     assert.equal(payload.foods[0].grams, 300);
+  });
+
+  it('refuses a plausible-looking wrong match and rescues instead', async () => {
+    const dev = await device();
+    // The real failure this reproduces: USDA's top hit for a verbose food name
+    // was a protein product, which reported an apple as 0g carbs / 45g protein.
+    h.usda.candidates.set('red apple', [
+      { description: 'Apple-flavored whey protein powder', protein: 45.9, fat: 1.9, carbs: 0 },
+      { description: 'Apples, raw, with skin', protein: 0.3, fat: 0.2, carbs: 13.8 },
+    ]);
+    h.openai.behaviour = { foods: oneFood('red apple, whole, medium', 180) };
+
+    const payload = (await (await dev.analyze()).json()) as { foods: Record<string, number>[] };
+    assert.equal(payload.foods[0].carbs, 24.8, '13.8g/100g scaled to 180g, not the protein powder');
+    assert.equal(payload.foods[0].protein, 0.5);
+  });
+
+  it('sends a food to the fallback when no candidate is close enough', async () => {
+    const dev = await device();
+    // Shares one word, but is padded with five the query never mentioned.
+    h.usda.candidates.set('pad thai', [
+      { description: 'Thai-style peanut sauce mix, dry, commercially prepared', protein: 3, fat: 0.6, carbs: 2.7 },
+    ]);
+    h.openai.behaviour = {
+      foods: oneFood('pad thai', 100),
+      fallbackFoods: [{ name: 'pad thai', carbs: 30, protein: 8, fat: 6 }],
+    };
+
+    const payload = (await (await dev.analyze()).json()) as { foods: Record<string, number>[] };
+    assert.equal(payload.foods[0].carbs, 30, 'a weak match must not be trusted');
+  });
+
+  it('searches on the head noun, not the full descriptive name', async () => {
+    const dev = await device();
+    h.usda.foods.set('grilled chicken breast', { protein: 31, fat: 3.6, carbs: 0 });
+    h.openai.behaviour = { foods: oneFood('grilled chicken breast, skinless, sliced', 100) };
+
+    await dev.analyze();
+    assert.equal(h.usda.queries[0], 'grilled chicken breast');
+  });
+
+  it('still returns zeros when even the fallback has nothing', async () => {
+    const dev = await device();
+    h.openai.behaviour = { foods: oneFood('pad thai', 300), fallbackFoods: [] };
+
+    const payload = (await (await dev.analyze()).json()) as { foods: Record<string, number>[] };
+    assert.equal(payload.foods[0].carbs, 0);
+  });
+
+  it('does not call the fallback when USDA answered', async () => {
+    const dev = await device();
+    h.openai.behaviour = { foods: oneFood('white rice', 100) };
+    h.usda.foods.set('white rice', { protein: 2.7, fat: 0.3, carbs: 28 });
+
+    await dev.analyze();
+    const models = h.openai.requests.map((r) => r.model);
+    assert.deepEqual(models, ['test-model'], 'USDA hit means no rescue call');
+  });
+
+  it('ignores a fallback row for a food nobody asked about', async () => {
+    const dev = await device();
+    h.openai.behaviour = {
+      foods: oneFood('pad thai', 100),
+      fallbackFoods: [{ name: 'injected cake', carbs: 99, protein: 1, fat: 1 }],
+    };
+
+    const payload = (await (await dev.analyze()).json()) as { foods: { name: string; carbs: number }[] };
+    assert.equal(payload.foods.length, 1);
+    assert.equal(payload.foods[0].name, 'pad thai');
+    assert.equal(payload.foods[0].carbs, 0);
   });
 
   it('survives a USDA outage', async () => {
@@ -831,6 +905,78 @@ describe('usage metering', () => {
     const payload = (await last!.json()) as { error: string; retryAfterSeconds: number };
     assert.equal(payload.error, 'quota_exceeded');
     assert.ok(payload.retryAfterSeconds > 0);
+  });
+});
+
+// ------------------------------------------------------------ admin views
+
+describe('admin views', () => {
+  const admin = { authorization: 'Bearer admin-token-for-tests-at-least-32-chars' };
+
+  it('404s without a token, so the routes do not advertise themselves', async () => {
+    assert.equal((await h.app.request('/admin/stats')).status, 404);
+    assert.equal((await h.app.request('/admin/users')).status, 404);
+  });
+
+  it('404s on a wrong token rather than 401', async () => {
+    const res = await h.app.request('/admin/stats', { headers: { authorization: 'Bearer wrong-token-value' } });
+    assert.equal(res.status, 404);
+  });
+
+  it('reports whole-service totals in real dollars', async () => {
+    const dev = await device();
+    // USDA hit, so only the vision call bills and the total stays exact.
+    h.usda.foods.set('white rice', { protein: 2.7, fat: 0.3, carbs: 28 });
+    h.openai.behaviour = { foods: oneFood(), usage: { prompt_tokens: 2_000_000, completion_tokens: 1_000_000 } };
+    await dev.analyze();
+
+    const res = await h.app.request('/admin/stats', { headers: admin });
+    const payload = (await res.json()) as { month: { requests: number; usd: number }; model: string };
+
+    assert.equal(res.status, 200);
+    assert.equal(payload.month.requests, 1);
+    // 2M input @ $1.25 + 1M output @ $10.00
+    assert.equal(payload.month.usd, 12.5);
+    assert.equal(payload.model, 'test-model');
+  });
+
+  it('prices cached input at the cheaper rate', async () => {
+    const dev = await device();
+    h.usda.foods.set('white rice', { protein: 2.7, fat: 0.3, carbs: 28 });
+    h.openai.behaviour = { foods: oneFood(), usage: { prompt_tokens: 1_000_000, completion_tokens: 0 } };
+    await dev.analyze();
+
+    const res = await h.app.request('/admin/stats', { headers: admin });
+    const payload = (await res.json()) as { month: { usd: number } };
+    assert.equal(payload.month.usd, 1.25, 'uncached input bills at the full rate');
+  });
+
+  it('lists users newest first with their spend', async () => {
+    const first = await device();
+    const second = await device();
+    // Index them the way /auth/apple would.
+    const { indexUser } = await import('../src/usage.js');
+    await indexUser(first.userId, 1000);
+    await indexUser(second.userId, 2000);
+
+    h.openai.behaviour = { foods: oneFood() };
+    await second.analyze();
+
+    const res = await h.app.request('/admin/users', { headers: admin });
+    const payload = (await res.json()) as { users: { id: string; month: { requests: number } }[] };
+
+    assert.equal(res.status, 200);
+    assert.equal(payload.users[0].id, second.userId, 'most recent signup first');
+    assert.equal(payload.users[0].month.requests, 1);
+    assert.equal(payload.users[1].month.requests, 0);
+  });
+
+  it('counts users without scanning the keyspace', async () => {
+    const { indexUser } = await import('../src/usage.js');
+    for (let i = 0; i < 5; i++) await indexUser(`indexed-${i}`, 1000 + i);
+
+    const payload = (await (await h.app.request('/admin/stats', { headers: admin })).json()) as { users: number };
+    assert.equal(payload.users, 5);
   });
 });
 

@@ -33,6 +33,26 @@ Errors are **plain text**, because the client shows the response body verbatim
 `{"error":"quota_exceeded"}` — the client renders its own message there, so that body is
 for machines. Upstream errors are logged, never returned.
 
+## Getting macros right
+
+A silent zero is the dangerous failure here: "pad thai → 0g carbs" reads to the app as
+"no insulin needed". Three things guard against it, in order:
+
+1. **USDA is the authority**, queried on the head noun (`"red apple, whole, medium"` →
+   `red apple`) because a verbose name dilutes the search.
+2. **Candidates are scored, not trusted.** USDA's top hit for `red apple` was
+   *Apple-flavored whey protein powder* — which reported an apple as 0g carbs and 45.9g
+   protein. Five candidates are fetched and ranked by an F1 over content words, so a
+   description padded with words nobody asked for loses to *Apples, raw, with skin*.
+   Below 0.45 nothing is trusted.
+3. **Anything unresolved goes to a cheap model** (`gpt-5-nano`, ~25× cheaper than the
+   vision pass) in one batched call, cached per food name. A food only ever reports zero
+   if that fails too.
+
+USDA's edge also returns intermittent nginx 400s for requests that succeed on retry, so
+lookups retry once, and an outage is **never** cached — otherwise a one-second blip would
+serve zero carbs for that food for a day.
+
 ## The three gates
 
 Each defaults to **on**. A gate whose dependency is missing records a config problem and
