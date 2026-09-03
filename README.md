@@ -61,6 +61,7 @@ npm install
 cp .env.example .env      # fill in OPENAI_API_KEY at minimum
 npm test                  # 84 tests, no network, no credentials needed
 npm run typecheck
+npm run users             # who is registered, and what they've spent
 vercel dev                # bypass token works here; it does not in production
 ```
 
@@ -76,6 +77,28 @@ omit it and get the pinned root.
 **What the tests cannot cover:** a genuine Apple-signed attestation or subscription
 receipt. Those paths are exercised only for rejection (forged chain, self-signed receipt,
 unsigned JWT). First real-device sign-in is the remaining unknown.
+
+## Where the data lives
+
+There is **no SQL database and no health data on the server**. The diary — glucose
+readings, meals, food items — stays in SwiftData on the device. All the server keeps is
+identity and metering, in Redis:
+
+| Key | Holds |
+|---|---|
+| `user:<appleSub>` | account record: created/last-seen, and name + email if Apple supplied them |
+| `attest:<keyId>` | one device's App Attest public key |
+| `attestkeys:<appleSub>` | that user's set of device key ids |
+| `attest:counters` | sorted set of last-seen signature counter per key — the replay defence |
+| `usage:<appleSub>:<YYYY-MM>` | requests, tokens, spend (daily rows too, 90-day TTL) |
+| `challenge:` `revoked:` `rl:` `usda:` | one-time challenges, session revocations, quota counters, nutrition cache |
+
+`npm run users` prints all of it; `npm run users -- --keys` adds per-namespace counts.
+The raw store is also browsable in the Upstash console via the Vercel dashboard
+(Storage → `diabeto-redis` → Open in Upstash).
+
+A user row is created **only** by `POST /auth/apple`, so the table stays empty until Sign in
+with Apple works — which needs a paid Apple Developer Program membership.
 
 ## Deploying
 

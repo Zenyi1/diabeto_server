@@ -3,7 +3,7 @@ node_modules/
 *.p8
 .DS_Store
 
-# Secrets. The negation must come last, or the wildcard swallows it again.
+# Secrets. Negation must stay last, or a later wildcard swallows it again.
 .env
 .env.*
 !.env.example

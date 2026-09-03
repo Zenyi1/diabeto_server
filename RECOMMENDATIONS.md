@@ -4,22 +4,22 @@ Written after auditing the iOS client (2026-09-03). The client is done and harde
 file is what the server still has to do. `docs/backend-contract.md` in the **client** repo
 is the wire contract — this is the *why*, the ordering, and the things that will bite.
 
-## Where this repo stands
+## Status — superseded in part by the README
 
-`api/` is empty. What exists is good: `src/certs.ts` embeds the Apple App Attest root and
-Apple Root CA G3 with published fingerprints in comments (correct — don't fetch roots at
-runtime), the dependency set is well chosen (`hono`, `jose`, `cbor-x`, `@peculiar/x509`,
-`@apple/app-store-server-library`, `@upstash/ratelimit`), and `.env.example` already
-describes gates that fail closed and a deadline under the client's timeout.
+**This file was written when `api/` was empty.** The server is now built: all seven
+endpoints, the three gates, usage metering, and 84 tests against fake upstreams. `README.md`
+is the accurate description of what exists; keep this file for the reasoning behind the
+security decisions and for the parts still open.
 
-Secrets are handled correctly: `.env` holds a live OpenAI key, is covered by `.gitignore`
-(`.env`, `.env.*`, `*.p8`), and `git log --all -- .env` confirms it was never committed.
+Resolved since it was written: the bypass token is now structurally inert in production,
+`maxDuration` matches the client's 90s cutoff, `SESSION_TTL_DAYS` came down to 60 with
+revocation on account deletion, usage metering and `GET /usage` exist, and the client now
+sends `X-Subscription-Jws` so `REQUIRE_SUBSCRIPTION=true` can actually be turned on.
 
-**The thing to internalise:** every security control the client relies on lives in the file
-that isn't written yet. The client cannot enforce any of them — a patched build can claim
-to be signed in, subscribed, and attested. Treat all three as server-side facts.
-
----
+Still open, and both blocked on the Apple Developer Program: turning the attest and
+subscription gates on against real Apple-signed material. The test suite covers those
+paths only for *rejection* — forged chain, self-signed receipt, unsigned JWT — so first
+real-device sign-in remains the genuine unknown.
 
 ## Build in this order
 
