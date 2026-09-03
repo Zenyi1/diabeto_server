@@ -12,6 +12,7 @@
 import { Environment, SignedDataVerifier } from '@apple/app-store-server-library';
 import { APPLE_ROOT_CA_G3_DER } from './certs.js';
 import { config } from './config.js';
+import { redis } from './redis.js';
 
 let verifier: SignedDataVerifier | null = null;
 
@@ -31,6 +32,32 @@ export class SubscriptionError extends Error {}
 export interface ActiveSubscription {
   productId: string;
   expiresDate: number;
+}
+
+export interface SubscriptionRecord extends ActiveSubscription {
+  checkedAt: number;
+}
+
+/**
+ * Remembers the last verified entitlement so the admin views can answer "who is
+ * subscribed" without an Apple round trip. Verification itself still happens on
+ * every request — this is a read model, never the gate.
+ */
+export async function rememberSubscription(userId: string, active: ActiveSubscription): Promise<void> {
+  try {
+    const record: SubscriptionRecord = { ...active, checkedAt: Date.now() };
+    await redis().set(`subscription:${userId}`, record);
+  } catch (error) {
+    console.warn('[subscription] failed to record status:', error);
+  }
+}
+
+export async function readSubscription(userId: string): Promise<SubscriptionRecord | null> {
+  try {
+    return await redis().get<SubscriptionRecord>(`subscription:${userId}`);
+  } catch {
+    return null;
+  }
 }
 
 /** Throws SubscriptionError unless the JWS proves a currently-active entitlement. */

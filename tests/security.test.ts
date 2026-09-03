@@ -971,6 +971,51 @@ describe('admin views', () => {
     assert.equal(payload.users[1].month.requests, 0);
   });
 
+  it('serves the dashboard shell without a token but with no data in it', async () => {
+    const res = await h.app.request('/admin');
+    const html = await res.text();
+
+    assert.equal(res.status, 200);
+    assert.match(html, /<title>diabeto · admin<\/title>/);
+    // The shell must not embed anything the token is supposed to protect.
+    for (const secret of ['admin-token-for-tests', 'sk-test-secret-key-do-not-leak', 'test-session-secret']) {
+      assert.ok(!html.includes(secret), `dashboard leaked ${secret}`);
+    }
+  });
+
+  it('reports subscription state per user', async () => {
+    const dev = await device();
+    const { rememberSubscription } = await import('../src/subscription.js');
+    const { indexUser } = await import('../src/usage.js');
+    await indexUser(dev.userId, Date.now());
+    await rememberSubscription(dev.userId, {
+      productId: 'com.zenyi.diabeto.pro.monthly',
+      expiresDate: Date.now() + 86_400_000,
+    });
+
+    const payload = (await (await h.app.request('/admin/users', { headers: admin })).json()) as {
+      users: { subscription: { active: boolean; productId: string } | null }[];
+    };
+    assert.equal(payload.users[0].subscription?.active, true);
+    assert.equal(payload.users[0].subscription?.productId, 'com.zenyi.diabeto.pro.monthly');
+  });
+
+  it('marks a lapsed subscription inactive rather than dropping it', async () => {
+    const dev = await device();
+    const { rememberSubscription } = await import('../src/subscription.js');
+    const { indexUser } = await import('../src/usage.js');
+    await indexUser(dev.userId, Date.now());
+    await rememberSubscription(dev.userId, {
+      productId: 'com.zenyi.diabeto.pro.monthly',
+      expiresDate: Date.now() - 1000,
+    });
+
+    const payload = (await (await h.app.request('/admin/users', { headers: admin })).json()) as {
+      users: { subscription: { active: boolean } | null }[];
+    };
+    assert.equal(payload.users[0].subscription?.active, false);
+  });
+
   it('counts users without scanning the keyspace', async () => {
     const { indexUser } = await import('../src/usage.js');
     for (let i = 0; i < 5; i++) await indexUser(`indexed-${i}`, 1000 + i);

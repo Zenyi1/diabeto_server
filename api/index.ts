@@ -34,10 +34,16 @@ import {
   unindexUser,
 } from '../src/usage.js';
 import { AttestError, verifyAssertion, verifyAttestation, type AttestKeyRecord } from '../src/attest.js';
-import { SubscriptionError, verifySubscriptionJws } from '../src/subscription.js';
+import {
+  SubscriptionError,
+  readSubscription,
+  rememberSubscription,
+  verifySubscriptionJws,
+} from '../src/subscription.js';
 import { DecomposeError, decompose } from '../src/openai.js';
 import { macrosFor, scaleMacros } from '../src/usda.js';
 import { estimateMacros, normalize } from '../src/macro-fallback.js';
+import { ADMIN_PAGE } from '../src/admin-page.js';
 import { limitIp, limitUser } from '../src/ratelimit.js';
 
 class HttpError extends Error {
@@ -218,6 +224,16 @@ function requireAdmin(request: Request): void {
   }
 }
 
+/**
+ * The dashboard shell. Served without a token because it contains no data — it
+ * asks for one and calls the gated endpoints below. Absent when no ADMIN_TOKEN
+ * is configured, so the surface only exists once you turn it on.
+ */
+app.get('/admin', (c) => {
+  if (!config.adminToken) throw new HttpError(404, 'Not found.');
+  return c.html(ADMIN_PAGE);
+});
+
 app.get('/admin/stats', async (c) => {
   requireAdmin(c.req.raw);
   assertConfigured();
@@ -241,10 +257,11 @@ app.get('/admin/users', async (c) => {
 
   const users = await Promise.all(
     ids.map(async (id) => {
-      const [record, devices, usage] = await Promise.all([
+      const [record, devices, usage, subscription] = await Promise.all([
         redis().get<{ createdAt?: number; lastSeenAt?: number; email?: string; fullName?: string }>(`user:${id}`),
         redis().scard(`attestkeys:${id}`),
         readUsage(id),
+        readSubscription(id),
       ]);
       return {
         id,
@@ -253,6 +270,13 @@ app.get('/admin/users', async (c) => {
         createdAt: record?.createdAt ?? null,
         lastSeenAt: record?.lastSeenAt ?? null,
         devices,
+        subscription: subscription
+          ? {
+              productId: subscription.productId,
+              expiresDate: subscription.expiresDate,
+              active: subscription.expiresDate > Date.now(),
+            }
+          : null,
         month: { ...usage.month, usd: usage.month.usdMicros / 1_000_000 },
       };
     }),
@@ -406,14 +430,22 @@ app.post('/analyze', async (c) => {
     await enforceAttestation(request, rawBody, userId);
   }
 
+  const jws = bypassed ? null : request.headers.get('x-subscription-jws');
   if (config.gates.requireSubscription && !bypassed) {
-    const jws = request.headers.get('x-subscription-jws');
     if (!jws) throw new HttpError(402, 'Diabeto Pro is required for photo analysis.');
     try {
-      await verifySubscriptionJws(jws);
+      await rememberSubscription(userId, await verifySubscriptionJws(jws));
     } catch (error) {
       if (error instanceof SubscriptionError) throw new HttpError(402, 'Your Diabeto Pro subscription is not active.');
       throw error;
+    }
+  } else if (jws) {
+    // Gate is off, but a receipt was sent anyway — verify and record it so the
+    // dashboard shows who is subscribed before the gate is switched on.
+    try {
+      await rememberSubscription(userId, await verifySubscriptionJws(jws));
+    } catch {
+      // Not a gate here, so an invalid receipt just means no status to show.
     }
   }
 
