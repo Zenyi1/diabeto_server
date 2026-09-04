@@ -1,7 +1,12 @@
 # Setting up Google sign-in
 
-Both sides of the code are written and deployed. All that's missing is one value from
-Google Cloud Console — an **iOS OAuth client ID** — which goes in two places.
+> **Status: the client ID is set on both sides and `/auth/google` is live.**
+> Steps 1 and 2 below are done. What remains is step 3 — signing in on a real device —
+> plus confirming the consent-screen **Test users** list, which is the one thing that can
+> still silently fail.
+
+Both sides of the code are written and deployed. The one value from Google Cloud Console —
+an **iOS OAuth client ID** — goes in two places.
 
 Once it's set, sign-in → session → `/analyze` works on a real device **without a paid Apple
 Developer Program membership**. That's the point of doing this first: it's the only way to
@@ -29,7 +34,7 @@ genuinely all that's needed.
 
 ---
 
-## 1. Google Cloud Console
+## 1. Google Cloud Console  ✅ *client created*
 
 1. Go to <https://console.cloud.google.com/> and **create a project** (or pick an existing
    one). Name it anything — `diabeto` is fine.
@@ -56,7 +61,7 @@ You do not need to enable any APIs. Sign-in works off the consent screen alone.
 
 ---
 
-## 2. Put the value in two places
+## 2. Put the value in two places  ✅ *done*
 
 **a) The server** — from this repo:
 
@@ -85,26 +90,22 @@ placeholder is gone, which is what reveals the Google button.
 
 ---
 
-## 3. Verify
+## 3. Verify  ← *you are here*
 
-**Server** — before the client ID is set, the route is deliberately off:
+**Server** — already confirmed:
 
 ```console
-$ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://diabetoserver.vercel.app/auth/google \
+$ curl -s -X POST https://diabetoserver.vercel.app/auth/google \
     -H 'content-type: application/json' -d '{}'
-404          # correct: empty GOOGLE_CLIENT_ID disables the route
-```
+Sign in did not include an identity token.        # 400 — route is live
 
-After setting it and redeploying, the same call should return **400** ("Sign in did not
-include an identity token") — the route now exists and is rejecting an empty body. A forged
-token should return **401**:
-
-```console
-$ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://diabetoserver.vercel.app/auth/google \
+$ curl -s -X POST https://diabetoserver.vercel.app/auth/google \
     -H 'content-type: application/json' \
     -d '{"idToken":"eyJhbGciOiJub25lIn0.eyJzdWIiOiJhIn0.","nonce":"x"}'
-401
+That sign-in could not be verified.               # 401 — forgery rejected
 ```
+
+A `404` here would mean `GOOGLE_CLIENT_ID` is unset or the deploy didn't happen.
 
 **On device** — build to a real iPhone, tap Sign in with Google, complete the Google sheet.
 Then confirm the account exists:
