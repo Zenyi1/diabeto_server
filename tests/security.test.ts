@@ -19,7 +19,7 @@ const h = await boot({ ANALYZE_DEADLINE_MS: '1500' });
 // Dynamic: src/config.ts reads env at module load, and a static import would be
 // hoisted above boot(), leaving every route answering 503.
 const { verifyAssertion, verifyAttestation } = await import('../src/attest.js');
-const { appleNonceMatches } = await import('../src/session.js');
+const { appleNonceMatches, googleNonceMatches } = await import('../src/session.js');
 after(() => h.stop());
 beforeEach(() => h.reset());
 
@@ -34,7 +34,6 @@ async function device(userId = freshUser()) {
     token,
     keyId,
     privateKeyPem,
-    nextCounter: () => ++counter,
     headers(body: Buffer, options: { counter?: number; signedBody?: Buffer } = {}) {
       const assertion = buildAssertion({
         privateKeyPem,
@@ -812,6 +811,68 @@ describe('/auth/apple', () => {
       body: JSON.stringify({ identityToken: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdHRhY2tlciJ9.', nonce: 'x' }),
     });
     assert.equal(res.status, 401);
+  });
+});
+
+// ------------------------------------------------------ google sign-in
+
+describe('Google sign-in', () => {
+  it('rejects a request with no identity token', async () => {
+    const res = await h.app.request('/auth/google', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nonce: 'x' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it('rejects an unsigned token', async () => {
+    const res = await h.app.request('/auth/google', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idToken: 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdHRhY2tlciJ9.', nonce: 'x' }),
+    });
+    assert.equal(res.status, 401);
+  });
+
+  it('rejects a token Google did not sign', async () => {
+    const res = await h.app.request('/auth/google', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idToken: 'not-a-jwt-at-all', nonce: 'x' }),
+    });
+    assert.equal(res.status, 401);
+  });
+
+  it('compares the nonce verbatim, unlike Apple', () => {
+    const raw = 'kZ8f_raw-nonce-value';
+    assert.equal(googleNonceMatches(raw, raw), true);
+    assert.equal(googleNonceMatches(raw, 'a-different-nonce'), false);
+  });
+
+  it('never accepts the Apple-style hashed nonce, and vice versa', () => {
+    // This is the regression guard: the two helpers are not interchangeable, and
+    // using appleNonceMatches for Google would reject every real sign-in.
+    const raw = 'kZ8f_raw-nonce-value';
+    const hashed = createHash('sha256').update(raw).digest('hex');
+
+    assert.equal(googleNonceMatches(raw, hashed), false, 'Google echoes the raw nonce, not its hash');
+    assert.equal(appleNonceMatches(raw, raw), false, 'Apple echoes the hash, not the raw nonce');
+    assert.equal(appleNonceMatches(raw, hashed), true);
+    assert.equal(googleNonceMatches(raw, raw), true);
+  });
+});
+
+describe('session subject namespacing', () => {
+  it('keeps the same provider id distinct across providers', async () => {
+    const { issueSessionToken, verifySessionToken } = await import('../src/session.js');
+
+    const apple = await verifySessionToken(await issueSessionToken('apple', 'shared-id'));
+    const google = await verifySessionToken(await issueSessionToken('google', 'shared-id'));
+
+    assert.equal(apple, 'apple:shared-id');
+    assert.equal(google, 'google:shared-id');
+    assert.notEqual(apple, google, 'two providers must never collide on one account');
   });
 });
 

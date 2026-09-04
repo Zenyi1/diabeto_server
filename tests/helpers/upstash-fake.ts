@@ -22,9 +22,6 @@ export class FakeUpstash {
   private readonly store = new Map<string, Entry>();
   private server: Server | null = null;
 
-  /** Every command the server received, for asserting on access patterns. */
-  readonly commands: string[][] = [];
-
   private live(key: string): Entry | undefined {
     const entry = this.store.get(key);
     if (!entry) return undefined;
@@ -37,7 +34,6 @@ export class FakeUpstash {
 
   private run(command: unknown[]): unknown {
     const parts = command.map((part) => String(part));
-    this.commands.push(parts);
     const [name, key, ...rest] = parts;
 
     switch (name.toLowerCase()) {
@@ -174,12 +170,6 @@ export class FakeUpstash {
         const stop = Number(rest[1]);
         return sorted.slice(start, stop < 0 ? undefined : stop + 1);
       }
-      case 'zscore': {
-        const entry = this.live(key);
-        if (!(entry?.value instanceof ZSet)) return null;
-        const score = entry.value.get(rest[0]);
-        return score === undefined ? null : String(score);
-      }
       case 'flushall': {
         this.store.clear();
         return 'OK';
@@ -228,7 +218,6 @@ export class FakeUpstash {
 
   reset(): void {
     this.store.clear();
-    this.commands.length = 0;
   }
 
   async stop(): Promise<void> {

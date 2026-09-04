@@ -8,7 +8,7 @@ USDA nutrition lookup), and gates access three ways.
 
 ```
 iOS app ──POST /analyze──► Vercel Function (Hono, Node 24)
-                             ├─ session JWT      (Sign in with Apple)
+                             ├─ session JWT      (Sign in with Apple or Google)
                              ├─ App Attest       (assertion over the raw body)
                              ├─ subscription     (StoreKit 2 JWS)
                              ├─ rate limit       (Upstash Redis)
@@ -22,11 +22,13 @@ iOS app ──POST /analyze──► Vercel Function (Hono, Node 24)
 |---|---|---|---|
 | `POST` | `/analyze` | session + attest + subscription | `{"image":"<base64 jpeg>"}` → `{"foods":[…]}` |
 | `POST` | `/auth/apple` | none (IP rate-limited) | identity token + nonce → `{"sessionToken"}` |
+| `POST` | `/auth/google` | none (IP rate-limited) | Google ID token + nonce → `{"sessionToken"}` |
 | `GET` | `/attest/challenge` | session | one-time challenge for key registration |
 | `POST` | `/attest/register` | session | verifies an attestation, stores the public key |
 | `GET` | `/usage` | session | this month's requests, tokens, spend, and limits |
 | `DELETE` | `/account` | session | erases user, device keys and usage; revokes tokens |
 | `GET` | `/health` | none | gate state and config problems |
+| `GET` | `/admin` | token | operator dashboard: users, subscriptions, spend |
 
 Errors are **plain text**, because the client shows the response body verbatim
 (`Request failed (500). <body>`). The one exception is `429`, which returns
@@ -59,9 +61,12 @@ Each defaults to **on**. A gate whose dependency is missing records a config pro
 makes the route answer `503` — it never degrades into serving ungated traffic. `/health`
 reports exactly what's missing.
 
-- **Session** — Sign in with Apple identity token verified against Apple's JWKS
-  (`iss`, `aud` = bundle id, `exp`), plus the **nonce**: Apple echoes `SHA256(rawNonce)`
-  into the token, and recomputing it is what stops a captured token being replayed.
+- **Session** — Sign in with Apple *or* Google, each verified against its own JWKS, plus
+  the **nonce** that stops a captured token being replayed. The two are not
+  interchangeable: Apple echoes `SHA256(rawNonce)` into the token, Google echoes the nonce
+  verbatim, so they have separate comparison helpers and a test that keeps them apart.
+  Session subjects are namespaced (`apple:…` / `google:…`) so providers can never collide.
+  Google needs no Apple entitlement, so it works on a free Personal Team today.
 - **App Attest** — attested once per install, then every `/analyze` carries an assertion
   over `SHA256(rawBody)`. The raw bytes are hashed *before* JSON parsing; re-serialising
   would invalidate every genuine signature. Replay is blocked by a strictly-increasing
@@ -79,9 +84,8 @@ reports exactly what's missing.
 ```bash
 npm install
 cp .env.example .env      # fill in OPENAI_API_KEY at minimum
-npm test                  # 84 tests, no network, no credentials needed
+npm test                  # 105 tests, no network, no credentials needed
 npm run typecheck
-npm run users             # who is registered, and what they've spent
 vercel dev                # bypass token works here; it does not in production
 ```
 
@@ -106,19 +110,24 @@ identity and metering, in Redis:
 
 | Key | Holds |
 |---|---|
-| `user:<appleSub>` | account record: created/last-seen, and name + email if Apple supplied them |
+| `user:<userId>` | account record: created/last-seen, name + email. `userId` is `apple:…` or `google:…` |
 | `attest:<keyId>` | one device's App Attest public key |
-| `attestkeys:<appleSub>` | that user's set of device key ids |
+| `attestkeys:<userId>` | that user's set of device key ids |
 | `attest:counters` | sorted set of last-seen signature counter per key — the replay defence |
-| `usage:<appleSub>:<YYYY-MM>` | requests, tokens, spend (daily rows too, 90-day TTL) |
+| `usage:<userId>:<YYYY-MM>` | requests, tokens, spend (daily rows too, 90-day TTL) |
 | `challenge:` `revoked:` `rl:` `usda:` | one-time challenges, session revocations, quota counters, nutrition cache |
 
-`npm run users` prints all of it; `npm run users -- --keys` adds per-namespace counts.
-The raw store is also browsable in the Upstash console via the Vercel dashboard
-(Storage → `diabeto-redis` → Open in Upstash).
+**[`/admin`](https://diabetoserver.vercel.app/admin)** shows all of it — users, subscribed
+count, analyses and spend — after you paste `ADMIN_TOKEN` once. The raw store is also
+browsable in the Upstash console via the Vercel dashboard (Storage → `diabeto-redis`).
 
-A user row is created **only** by `POST /auth/apple`, so the table stays empty until Sign in
-with Apple works — which needs a paid Apple Developer Program membership.
+For revenue, churn and subscriber counts, use **App Store Connect** — it is authoritative
+and sees purchases this server never does. What only this server can tell you is the
+per-user AI cost, which is what the dashboard is for.
+
+A user row is created only by a sign-in. Apple needs a paid Developer Program membership;
+**Google does not**, so setting `GOOGLE_CLIENT_ID` is the fastest way to get a real account
+and a real `/analyze` call on a device today.
 
 ## Deploying
 

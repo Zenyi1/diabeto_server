@@ -10,8 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "dev": "vercel dev",
-    "test": "node --import tsx --test tests/*.test.ts",
-    "users": "node --import tsx scripts/inspect.ts"
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@apple/app-store-server-library": "^3.1.0",

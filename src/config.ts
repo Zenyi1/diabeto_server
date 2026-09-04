@@ -95,6 +95,8 @@ if (configuredBypassToken && isProductionDeployment) {
   warnings.push('DEV_BYPASS_TOKEN is set — it skips every auth gate and must be removed before launch');
 }
 
+const googleClientId = str('GOOGLE_CLIENT_ID');
+
 const adminToken = str('ADMIN_TOKEN');
 if (adminToken && adminToken.length < 32) {
   problems.push('ADMIN_TOKEN is shorter than 32 characters — it guards user emails, so make it long');
@@ -135,6 +137,11 @@ export const config = {
     /** What App Attest actually signs over. */
     appId: `${teamId}.${bundleId}`,
     attestEnv,
+  },
+  google: {
+    /** iOS OAuth client id. Public by design — native clients use PKCE, not a secret. */
+    clientId: googleClientId,
+    enabled: Boolean(googleClientId),
   },
   session: {
     secret: sessionSecret,

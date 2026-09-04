@@ -19,6 +19,7 @@ export const DEV_BYPASS = 'dev-bypass-token-for-tests-only';
 export const SESSION_SECRET = 'test-session-secret-at-least-32-chars-long';
 export const PRODUCT_ID = 'com.zenyi.diabeto.pro.monthly';
 export const ADMIN_TOKEN = 'admin-token-for-tests-at-least-32-chars';
+export const GOOGLE_CLIENT_ID = '1234567890-testclient.apps.googleusercontent.com';
 
 /** Smallest thing that passes the JPEG magic-byte check. */
 export const JPEG = Buffer.concat([
@@ -67,6 +68,7 @@ export async function boot(overrides: Record<string, string> = {}): Promise<Harn
     REQUIRE_SUBSCRIPTION: 'false',
     DEV_BYPASS_TOKEN: DEV_BYPASS,
     ADMIN_TOKEN,
+    GOOGLE_CLIENT_ID,
     RATE_LIMIT_PER_MIN: '5',
     RATE_LIMIT_PER_DAY: '1000',
     ...overrides,

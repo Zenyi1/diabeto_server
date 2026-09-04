@@ -19,9 +19,11 @@ import { config, configProblems, configWarnings } from '../src/config.js';
 import { bumpAttestCounter, initAttestCounter, redis } from '../src/redis.js';
 import {
   appleNonceMatches,
+  googleNonceMatches,
   issueSessionToken,
   revokeSessions,
   verifyAppleIdentityToken,
+  verifyGoogleIdToken,
   verifySessionToken,
 } from '../src/session.js';
 import {
@@ -123,12 +125,37 @@ app.get('/health', (c) =>
 
 // ---------------------------------------------------------------- auth
 
-app.post('/auth/apple', async (c) => {
-  assertConfigured();
+/**
+ * Creates or refreshes an account. Identical for every provider, because
+ * `userId` is already namespaced (`apple:…` / `google:…`) by the time it lands
+ * here — nothing downstream knows or cares which provider it came from.
+ */
+async function upsertUser(userId: string, fullName?: string, email?: string): Promise<void> {
+  const key = `user:${userId}`;
+  const existing = await redis().get<{ createdAt?: number; fullName?: string; email?: string }>(key);
+  const createdAt = existing?.createdAt ?? Date.now();
+  await indexUser(userId, createdAt);
+  await redis().set(key, {
+    createdAt,
+    lastSeenAt: Date.now(),
+    // Apple sends these only on the first authorization, so an existing value is
+    // never overwritten by a later sign-in's nulls. Google sends them every time,
+    // but the same rule costs nothing.
+    fullName: existing?.fullName ?? fullName,
+    email: existing?.email ?? email,
+  });
+}
 
-  const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+/** Sign-in is unauthenticated by nature, so it is capped per source address. */
+async function guardSignIn(request: Request): Promise<void> {
+  assertConfigured();
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   const limit = await limitIp(ip);
   if (!limit.ok) throw new HttpError(429, 'Too many sign-in attempts. Please try again shortly.');
+}
+
+app.post('/auth/apple', async (c) => {
+  await guardSignIn(c.req.raw);
 
   const body = (await c.req.json().catch(() => null)) as {
     identityToken?: unknown;
@@ -165,20 +192,52 @@ app.post('/auth/apple', async (c) => {
     }
   }
 
-  const key = `user:${identity.appleUserId}`;
-  const existing = await redis().get<{ createdAt?: number; fullName?: string; email?: string }>(key);
-  const createdAt = existing?.createdAt ?? Date.now();
-  await indexUser(identity.appleUserId, createdAt);
-  await redis().set(key, {
-    createdAt,
-    lastSeenAt: Date.now(),
-    // Apple returns these only on the very first authorization, so an existing
-    // value is never overwritten by the nulls of later sign-ins.
-    fullName: existing?.fullName ?? (typeof body?.fullName === 'string' ? body.fullName : undefined),
-    email: existing?.email ?? (typeof body?.email === 'string' ? body.email : undefined),
-  });
+  await upsertUser(
+    `apple:${identity.appleUserId}`,
+    typeof body?.fullName === 'string' ? body.fullName : undefined,
+    typeof body?.email === 'string' ? body.email : undefined,
+  );
 
-  return c.json({ sessionToken: await issueSessionToken(identity.appleUserId) });
+  return c.json({ sessionToken: await issueSessionToken('apple', identity.appleUserId) });
+});
+
+/**
+ * Same shape as /auth/apple, with one difference that matters: Apple echoes
+ * SHA-256(rawNonce) into the token while Google echoes the nonce verbatim, so
+ * the two comparisons are not interchangeable.
+ */
+app.post('/auth/google', async (c) => {
+  await guardSignIn(c.req.raw);
+  if (!config.google.enabled) throw new HttpError(404, 'Google sign-in is not enabled.');
+
+  const body = (await c.req.json().catch(() => null)) as { idToken?: unknown; nonce?: unknown } | null;
+  const idToken = body?.idToken;
+  if (typeof idToken !== 'string' || !idToken) {
+    throw new HttpError(400, 'Sign in did not include an identity token.');
+  }
+
+  let identity;
+  try {
+    identity = await verifyGoogleIdToken(idToken);
+  } catch (error) {
+    console.warn('[auth] Google ID token rejected:', error);
+    throw new HttpError(401, 'That sign-in could not be verified.');
+  }
+
+  // Enforced whenever the token carries the claim, so it cannot be stripped to skip.
+  if (identity.nonce) {
+    const rawNonce = body?.nonce;
+    if (typeof rawNonce !== 'string' || !rawNonce) {
+      throw new HttpError(400, 'Sign in did not include its nonce.');
+    }
+    if (!googleNonceMatches(rawNonce, identity.nonce)) {
+      console.warn('[auth] Google nonce mismatch');
+      throw new HttpError(401, 'That sign-in could not be verified.');
+    }
+  }
+
+  await upsertUser(`google:${identity.googleUserId}`, identity.fullName, identity.email);
+  return c.json({ sessionToken: await issueSessionToken('google', identity.googleUserId) });
 });
 
 /** Account deletion, which the App Store requires for any app with sign-in. */

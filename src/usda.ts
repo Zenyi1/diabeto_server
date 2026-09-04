@@ -96,11 +96,7 @@ function cacheKey(name: string): string {
   return `usda:${name.toLowerCase().replace(/\s+/g, ' ').trim()}`;
 }
 
-export function scaleMacros(per100g: Macros, grams: number): Macros {
-  return scale(per100g, grams);
-}
-
-function scale(per100g: Per100g, grams: number): Macros {
+export function scaleMacros(per100g: Per100g, grams: number): Macros {
   const factor = grams / 100;
   return {
     carbs: per100g.carbs * factor,
@@ -222,7 +218,7 @@ export async function macrosFor(name: string, grams: number, signal: AbortSignal
   try {
     const cached = await redis().get<Per100g>(key);
     if (cached && typeof cached.carbs === 'number') {
-      return { ...scale(cached, grams), resolved: !isEmpty(cached) };
+      return { ...scaleMacros(cached, grams), resolved: !isEmpty(cached) };
     }
   } catch (error) {
     console.warn('[usda] cache read failed:', error);
@@ -251,5 +247,5 @@ export async function macrosFor(name: string, grams: number, signal: AbortSignal
     console.warn('[usda] cache write failed:', error);
   }
 
-  return { ...scale(per100g, grams), resolved };
+  return { ...scaleMacros(per100g, grams), resolved };
 }

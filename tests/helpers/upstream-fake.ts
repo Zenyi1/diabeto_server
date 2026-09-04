@@ -122,7 +122,6 @@ export class FakeUsda {
   >();
 
   status = 200;
-  delayMs = 0;
   queries: string[] = [];
 
   async start(): Promise<string> {
@@ -130,9 +129,6 @@ export class FakeUsda {
       const url = new URL(req.url ?? '/', 'http://localhost');
       const query = (url.searchParams.get('query') ?? '').toLowerCase();
       this.queries.push(query);
-
-      if (this.delayMs) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
-      if (res.destroyed) return;
 
       if (this.status !== 200) {
         res.writeHead(this.status, { 'content-type': 'application/json' });
@@ -166,7 +162,6 @@ export class FakeUsda {
     this.foods.clear();
     this.candidates.clear();
     this.status = 200;
-    this.delayMs = 0;
     this.queries = [];
   }
 
